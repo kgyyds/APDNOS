@@ -10,29 +10,28 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -41,20 +40,29 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.apdnos.ui.AppTheme
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.foundation.layout.fillMaxHeight
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -82,13 +90,30 @@ private fun RootLabScreen() {
     var rootStatus by remember { mutableStateOf("检测中...") }
     var outputStatus by remember { mutableStateOf("等待执行") }
     var showSettings by remember { mutableStateOf(false) }
+    var isSidebarOpen by remember { mutableStateOf(true) }
+    var isConsoleExpanded by remember { mutableStateOf(true) }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
-    val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val asmFiles = remember { mutableStateListOf<String>() }
     var activeFileName by remember { mutableStateOf<String?>(null) }
     var asmSource by remember { mutableStateOf("") }
     val asmDirectory = remember { File(context.filesDir, "asm") }
+    val editorScrollState = rememberScrollState()
+    val consoleScrollState = rememberScrollState()
+    val sidebarWidth by animateDpAsState(
+        targetValue = if (isSidebarOpen) 260.dp else 0.dp,
+        label = "sidebarWidth"
+    )
+    val consoleHeight by animateDpAsState(
+        targetValue = if (isConsoleExpanded) 220.dp else 56.dp,
+        label = "consoleHeight"
+    )
+    val lineNumbers by remember(asmSource) {
+        derivedStateOf {
+            val lineCount = asmSource.lineSequence().count().coerceAtLeast(1)
+            (1..lineCount).joinToString("\n") { it.toString() }
+        }
+    }
 
     LaunchedEffect(Unit) {
         if (!asmDirectory.exists()) {
@@ -112,149 +137,178 @@ private fun RootLabScreen() {
         rootStatus = checkRoot()
     }
 
-    ModalNavigationDrawer(
-        drawerState = drawerState,
-        drawerContent = {
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(MaterialTheme.colorScheme.surface)
-                    .padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "汇编文件",
-                        style = MaterialTheme.typography.titleMedium.copy(
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.primary
-                        )
-                    )
-                    IconButton(onClick = { scope.launch { drawerState.close() } }) {
-                        Icon(imageVector = Icons.Default.Close, contentDescription = "关闭侧栏")
-                    }
-                }
-                Button(
-                    onClick = {
-                        val index = asmFiles.size + 1
-                        val newFileName = "asm_$index.S"
-                        val newFile = File(asmDirectory, newFileName)
-                        newFile.writeText("")
-                        asmFiles.add(newFileName)
-                        activeFileName = newFileName
-                        asmSource = ""
-                        scope.launch { drawerState.close() }
-                    },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Icon(imageVector = Icons.Default.Add, contentDescription = null)
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(text = "新建汇编文件")
-                }
-                if (asmFiles.isEmpty()) {
-                    Text(
-                        text = "暂无文件",
-                        style = MaterialTheme.typography.bodyMedium.copy(
-                            fontStyle = FontStyle.Italic
-                        ),
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                } else {
-                    asmFiles.forEach { fileName ->
-                        val isActive = fileName == activeFileName
-                        Card(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 2.dp),
-                            colors = CardDefaults.cardColors(
-                                containerColor = if (isActive) {
-                                    MaterialTheme.colorScheme.primaryContainer
-                                } else {
-                                    MaterialTheme.colorScheme.surfaceVariant
-                                }
-                            ),
-                            shape = RoundedCornerShape(12.dp)
-                        ) {
-                            Column(modifier = Modifier.padding(12.dp)) {
-                                Text(
-                                    text = fileName,
-                                    style = MaterialTheme.typography.titleSmall.copy(
-                                        fontFamily = FontFamily.Monospace,
-                                        fontWeight = FontWeight.SemiBold
-                                    ),
-                                    color = MaterialTheme.colorScheme.onSurface
-                                )
-                                TextButton(
-                                    onClick = {
-                                        activeFileName = fileName
-                                        asmSource = File(asmDirectory, fileName).readText()
-                                        scope.launch { drawerState.close() }
-                                    }
-                                ) {
-                                    Text(text = if (isActive) "当前文件" else "切换到此文件")
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
     ) {
-        Scaffold(
-            topBar = {
-                HackerTopBar(
-                    title = activeFileName ?: "汇编实验室",
-                    onCompileClick = {
-                        val fileName = activeFileName
-                        if (fileName == null) {
-                            outputStatus = "请先创建汇编文件"
-                        } else {
-                            scope.launch {
-                                outputStatus = compileAndRun(
-                                    context = context,
-                                    clangPath = clangPath,
-                                    asmSource = asmSource,
-                                    fileName = fileName
-                                )
+        HackerTopBar(
+            title = activeFileName ?: "汇编实验室",
+            onCompileClick = {
+                val fileName = activeFileName
+                if (fileName == null) {
+                    outputStatus = "请先创建汇编文件"
+                } else {
+                    scope.launch {
+                        outputStatus = compileAndRun(
+                            context = context,
+                            clangPath = clangPath,
+                            asmSource = asmSource,
+                            fileName = fileName
+                        )
+                        isConsoleExpanded = true
+                    }
+                }
+            },
+            onMenuClick = { isSidebarOpen = !isSidebarOpen },
+            onSettingsClick = { showSettings = true }
+        )
+        Row(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+        ) {
+            AnimatedVisibility(visible = isSidebarOpen) {
+                Column(
+                    modifier = Modifier
+                        .width(sidebarWidth)
+                        .fillMaxHeight()
+                        .background(MaterialTheme.colorScheme.surface)
+                        .padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "汇编文件",
+                            style = MaterialTheme.typography.titleMedium.copy(
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        )
+                        IconButton(onClick = { isSidebarOpen = false }) {
+                            Icon(imageVector = Icons.Default.Close, contentDescription = "关闭侧栏")
+                        }
+                    }
+                    Button(
+                        onClick = {
+                            val index = asmFiles.size + 1
+                            val newFileName = "asm_$index.S"
+                            val newFile = File(asmDirectory, newFileName)
+                            newFile.writeText("")
+                            asmFiles.add(newFileName)
+                            activeFileName = newFileName
+                            asmSource = ""
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(imageVector = Icons.Default.Add, contentDescription = null)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(text = "新建汇编文件")
+                    }
+                    if (asmFiles.isEmpty()) {
+                        Text(
+                            text = "暂无文件",
+                            style = MaterialTheme.typography.bodyMedium.copy(
+                                fontStyle = FontStyle.Italic
+                            ),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    } else {
+                        asmFiles.forEach { fileName ->
+                            val isActive = fileName == activeFileName
+                            Card(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 2.dp),
+                                colors = CardDefaults.cardColors(
+                                    containerColor = if (isActive) {
+                                        MaterialTheme.colorScheme.primaryContainer
+                                    } else {
+                                        MaterialTheme.colorScheme.surfaceVariant
+                                    }
+                                ),
+                                shape = RoundedCornerShape(12.dp)
+                            ) {
+                                Column(modifier = Modifier.padding(12.dp)) {
+                                    Text(
+                                        text = fileName,
+                                        style = MaterialTheme.typography.titleSmall.copy(
+                                            fontFamily = FontFamily.Monospace,
+                                            fontWeight = FontWeight.SemiBold
+                                        ),
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                    TextButton(
+                                        onClick = {
+                                            activeFileName = fileName
+                                            asmSource = File(asmDirectory, fileName).readText()
+                                        }
+                                    ) {
+                                        Text(text = if (isActive) "当前文件" else "切换到此文件")
+                                    }
+                                }
                             }
                         }
-                    },
-                    onSettingsClick = { showSettings = true }
-                )
+                    }
+                }
             }
-        ) { padding ->
             Column(
                 modifier = Modifier
-                    .fillMaxSize()
-                    .background(MaterialTheme.colorScheme.background)
-                    .padding(padding)
+                    .weight(1f)
+                    .fillMaxHeight()
                     .padding(16.dp)
             ) {
-                OutlinedTextField(
-                    value = asmSource,
-                    onValueChange = { updated ->
-                        asmSource = updated
-                        val fileName = activeFileName ?: return@OutlinedTextField
-                        scope.launch(Dispatchers.IO) {
-                            File(asmDirectory, fileName).writeText(updated)
-                        }
-                    },
+                Row(
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(1f),
-                    label = { Text("ARM64 汇编源码") },
-                    textStyle = MaterialTheme.typography.bodySmall.copy(
-                        fontFamily = FontFamily.Monospace,
-                        color = MaterialTheme.colorScheme.onBackground
-                    ),
-                    singleLine = false
-                )
+                        .fillMaxSize()
+                        .verticalScroll(editorScrollState)
+                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                        .clip(RoundedCornerShape(12.dp))
+                        .padding(8.dp)
+                ) {
+                    Text(
+                        text = lineNumbers,
+                        modifier = Modifier
+                            .width(48.dp)
+                            .padding(end = 8.dp),
+                        style = MaterialTheme.typography.bodySmall.copy(
+                            fontFamily = FontFamily.Monospace,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        ),
+                        textAlign = TextAlign.End
+                    )
+                    OutlinedTextField(
+                        value = asmSource,
+                        onValueChange = { updated ->
+                            asmSource = updated
+                            val fileName = activeFileName ?: return@OutlinedTextField
+                            scope.launch(Dispatchers.IO) {
+                                File(asmDirectory, fileName).writeText(updated)
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("ARM64 汇编源码") },
+                        textStyle = MaterialTheme.typography.bodySmall.copy(
+                            fontFamily = FontFamily.Monospace,
+                            color = MaterialTheme.colorScheme.onBackground
+                        ),
+                        singleLine = false,
+                        maxLines = Int.MAX_VALUE
+                    )
+                }
             }
         }
+        ConsoleSheet(
+            outputStatus = outputStatus,
+            isExpanded = isConsoleExpanded,
+            onToggle = { isConsoleExpanded = !isConsoleExpanded },
+            scrollState = consoleScrollState,
+            height = consoleHeight
+        )
     }
 
     if (showSettings) {
@@ -262,7 +316,6 @@ private fun RootLabScreen() {
             clangPath = clangPath,
             onClangPathChange = { clangPath = it },
             rootStatus = rootStatus,
-            outputStatus = outputStatus,
             onRecheckRoot = { scope.launch { rootStatus = checkRoot() } },
             onDismiss = { showSettings = false }
         )
@@ -274,6 +327,7 @@ private fun RootLabScreen() {
 private fun HackerTopBar(
     title: String,
     onCompileClick: () -> Unit,
+    onMenuClick: () -> Unit,
     onSettingsClick: () -> Unit
 ) {
     TopAppBar(
@@ -306,7 +360,6 @@ private fun SettingsDialog(
     clangPath: String,
     onClangPathChange: (String) -> Unit,
     rootStatus: String,
-    outputStatus: String,
     onRecheckRoot: () -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -346,12 +399,56 @@ private fun SettingsDialog(
                     ),
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done)
                 )
-                Text(
-                    text = "输出日志",
-                    style = MaterialTheme.typography.titleSmall.copy(
-                        fontWeight = FontWeight.SemiBold
-                    )
+            }
+        }
+    )
+}
+
+@Composable
+private fun ConsoleSheet(
+    outputStatus: String,
+    isExpanded: Boolean,
+    onToggle: () -> Unit,
+    scrollState: androidx.compose.foundation.ScrollState,
+    height: androidx.compose.ui.unit.Dp
+) {
+    LaunchedEffect(outputStatus) {
+        scrollState.scrollTo(scrollState.maxValue)
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(height)
+            .background(MaterialTheme.colorScheme.surface)
+            .padding(horizontal = 16.dp, vertical = 12.dp)
+            .imePadding()
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "输出日志",
+                style = MaterialTheme.typography.titleSmall.copy(
+                    fontWeight = FontWeight.SemiBold
                 )
+            )
+            IconButton(onClick = onToggle) {
+                val icon = if (isExpanded) Icons.Default.KeyboardArrowDown else Icons.Default.KeyboardArrowUp
+                val desc = if (isExpanded) "收起控制台" else "展开控制台"
+                Icon(imageVector = icon, contentDescription = desc)
+            }
+        }
+        Spacer(modifier = Modifier.height(8.dp))
+        SelectionContainer {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f, fill = true)
+                    .verticalScroll(scrollState)
+            ) {
                 Text(
                     text = outputStatus,
                     color = MaterialTheme.colorScheme.onBackground,
@@ -359,7 +456,7 @@ private fun SettingsDialog(
                 )
             }
         }
-    )
+    }
 }
 
 private suspend fun checkRoot(): String = withContext(Dispatchers.IO) {
@@ -381,26 +478,35 @@ private suspend fun compileAndRun(
     withContext(Dispatchers.IO) {
         AdosLogger.d("Starting compileAndRun")
         val privateDir = File(context.filesDir, "asm")
-        val workDir = File("/data/local/tmp/APDNOS")
+        val workDirPath = "/data/local/tmp/APDNOS"
+        val workDir = File(workDirPath)
         try {
             if (!privateDir.exists()) {
                 privateDir.mkdirs()
             }
-            if (!workDir.exists()) {
-                workDir.mkdirs()
+            val ensureWorkDir = runCommand(listOf("su", "-c", "mkdir -p $workDirPath"))
+            if (ensureWorkDir.exitCode != 0) {
+                return@withContext if (isRootDenied(ensureWorkDir)) {
+                    "需要 root 权限"
+                } else {
+                    formatResult("创建工作目录失败", ensureWorkDir)
+                }
             }
             val safeBaseName = sanitizeFileBase(fileName)
             val sourceFile = File(privateDir, "$safeBaseName.S")
             val outputFile = File(workDir, "$safeBaseName.out")
             sourceFile.writeText(asmSource)
 
+            val escapedClang = shellEscape(clangPath)
+            val escapedSource = shellEscape(sourceFile.absolutePath)
+            val escapedOutput = shellEscape(outputFile.absolutePath)
             val compileCommand = buildString {
-                append(clangPath)
+                append(escapedClang)
                 append(" -fPIE -pie -nostdlib -Wl,-e,_start ")
                 append("-Wl,--dynamic-linker=/system/bin/linker64 ")
-                append(sourceFile.absolutePath)
+                append(escapedSource)
                 append(" -o ")
-                append(outputFile.absolutePath)
+                append(escapedOutput)
             }
             AdosLogger.d("Compile command: $compileCommand")
             val compileResult = runCommand(listOf("su", "-c", compileCommand))
@@ -412,8 +518,8 @@ private suspend fun compileAndRun(
                 }
             }
 
-            runCommand(listOf("su", "-c", "chmod 755 ${outputFile.absolutePath}"))
-            val execResult = runCommand(listOf("su", "-c", outputFile.absolutePath))
+            runCommand(listOf("su", "-c", "chmod 755 $escapedOutput"))
+            val execResult = runCommand(listOf("su", "-c", escapedOutput))
             if (execResult.exitCode != 0 && isRootDenied(execResult)) {
                 "需要 root 权限"
             } else {
@@ -447,6 +553,10 @@ private fun formatResult(prefix: String, result: CommandResult): String {
             appendLine("stderr:\n${result.stderr}")
         }
     }
+}
+
+private fun shellEscape(value: String): String {
+    return "'" + value.replace("'", "'\\''") + "'"
 }
 
 private fun sanitizeFileBase(fileName: String): String {
