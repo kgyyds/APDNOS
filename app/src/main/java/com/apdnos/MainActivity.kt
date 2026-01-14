@@ -54,6 +54,7 @@ import com.apdnos.ui.AppTheme
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Settings
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -223,6 +224,7 @@ private fun RootLabScreen() {
                             }
                         }
                     },
+                    onMenuClick = { scope.launch { drawerState.open() } },
                     onSettingsClick = { showSettings = true }
                 )
             }
@@ -274,6 +276,7 @@ private fun RootLabScreen() {
 private fun HackerTopBar(
     title: String,
     onCompileClick: () -> Unit,
+    onMenuClick: () -> Unit,
     onSettingsClick: () -> Unit
 ) {
     TopAppBar(
