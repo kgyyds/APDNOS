@@ -59,6 +59,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.util.UUID
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -276,6 +277,11 @@ private fun HackerTopBar(
     onSettingsClick: () -> Unit
 ) {
     TopAppBar(
+        navigationIcon = {
+            IconButton(onClick = onMenuClick) {
+                Icon(imageVector = Icons.Default.Menu, contentDescription = "打开侧栏")
+            }
+        },
         title = {
             Text(
                 text = title,
