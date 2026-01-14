@@ -351,6 +351,37 @@ private suspend fun compileAndRun(clangPath: String, asmSource: String): String 
         } catch (ex: Exception) {
             AdosLogger.e("compileAndRun failed", ex)
             "执行失败: ${ex.message}"
+        val workDir = File("/data/local/tmp/APDNOS")
+        if (!workDir.exists()) {
+            workDir.mkdirs()
+        }
+        val sourceFile = File(workDir, "main.S")
+        val outputFile = File(workDir, "main.out")
+        sourceFile.writeText(asmSource)
+
+        val compileCommand = buildString {
+            append(clangPath)
+            append(" -fPIE -pie -nostdlib -Wl,-e,_start ")
+            append("-Wl,--dynamic-linker=/system/bin/linker64 ")
+            append(sourceFile.absolutePath)
+            append(" -o ")
+            append(outputFile.absolutePath)
+        }
+        val compileResult = runCommand(listOf("su", "-c", compileCommand))
+        if (compileResult.exitCode != 0) {
+            return@withContext if (isRootDenied(compileResult)) {
+                "需要 root 权限"
+            } else {
+                formatResult("编译失败", compileResult)
+            }
+        }
+
+        runCommand(listOf("su", "-c", "chmod 755 ${outputFile.absolutePath}"))
+        val execResult = runCommand(listOf("su", "-c", outputFile.absolutePath))
+        if (execResult.exitCode != 0 && isRootDenied(execResult)) {
+            "需要 root 权限"
+        } else {
+            formatResult("执行完成", execResult)
         }
     }
 
@@ -393,6 +424,14 @@ private fun runCommand(command: List<String>): CommandResult {
         AdosLogger.e("Command failed", ex)
         CommandResult("", ex.message ?: "command failed", -1)
     }
+    val process = ProcessBuilder(command)
+        .redirectErrorStream(false)
+        .start()
+
+    val stdout = process.inputStream.bufferedReader().use { it.readText() }
+    val stderr = process.errorStream.bufferedReader().use { it.readText() }
+    val exitCode = process.waitFor()
+    return CommandResult(stdout, stderr, exitCode)
 }
 
 private fun isRootDenied(result: CommandResult): Boolean {
