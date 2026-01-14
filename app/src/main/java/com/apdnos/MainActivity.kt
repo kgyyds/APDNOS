@@ -10,7 +10,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
@@ -60,6 +59,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.util.UUID
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -82,7 +82,6 @@ private fun RootLabScreen() {
     var rootStatus by remember { mutableStateOf("检测中...") }
     var outputStatus by remember { mutableStateOf("等待执行") }
     var showSettings by remember { mutableStateOf(false) }
-    var consoleExpanded by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
@@ -254,12 +253,6 @@ private fun RootLabScreen() {
                     ),
                     singleLine = false
                 )
-                Spacer(modifier = Modifier.heightIn(min = 12.dp, max = 12.dp))
-                ConsolePanel(
-                    outputStatus = outputStatus,
-                    expanded = consoleExpanded,
-                    onToggle = { consoleExpanded = !consoleExpanded }
-                )
             }
         }
     }
@@ -269,6 +262,7 @@ private fun RootLabScreen() {
             clangPath = clangPath,
             onClangPathChange = { clangPath = it },
             rootStatus = rootStatus,
+            outputStatus = outputStatus,
             onRecheckRoot = { scope.launch { rootStatus = checkRoot() } },
             onDismiss = { showSettings = false }
         )
@@ -283,6 +277,11 @@ private fun HackerTopBar(
     onSettingsClick: () -> Unit
 ) {
     TopAppBar(
+        navigationIcon = {
+            IconButton(onClick = onMenuClick) {
+                Icon(imageVector = Icons.Default.Menu, contentDescription = "打开侧栏")
+            }
+        },
         title = {
             Text(
                 text = title,
@@ -307,6 +306,7 @@ private fun SettingsDialog(
     clangPath: String,
     onClangPathChange: (String) -> Unit,
     rootStatus: String,
+    outputStatus: String,
     onRecheckRoot: () -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -346,69 +346,20 @@ private fun SettingsDialog(
                     ),
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done)
                 )
-            }
-        }
-    )
-}
-
-@Composable
-private fun ConsolePanel(
-    outputStatus: String,
-    expanded: Boolean,
-    onToggle: () -> Unit
-) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant,
-            contentColor = MaterialTheme.colorScheme.onSurfaceVariant
-        ),
-        shape = RoundedCornerShape(16.dp)
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
                 Text(
-                    text = "控制台",
+                    text = "输出日志",
                     style = MaterialTheme.typography.titleSmall.copy(
                         fontWeight = FontWeight.SemiBold
                     )
                 )
-                TextButton(onClick = onToggle) {
-                    Text(text = if (expanded) "收起" else "展开")
-                }
-            }
-            if (expanded) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(min = 120.dp, max = 240.dp)
-                        .verticalScroll(rememberScrollState())
-                ) {
-                    Text(
-                        text = outputStatus,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        fontFamily = FontFamily.Monospace
-                    )
-                }
-            } else {
                 Text(
-                    text = outputStatus.lineSequence().firstOrNull()?.ifBlank { outputStatus } ?: "",
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
+                    text = outputStatus,
+                    color = MaterialTheme.colorScheme.onBackground,
                     fontFamily = FontFamily.Monospace
                 )
             }
         }
-    }
+    )
 }
 
 private suspend fun checkRoot(): String = withContext(Dispatchers.IO) {
