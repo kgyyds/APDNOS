@@ -4,14 +4,12 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
@@ -19,6 +17,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DrawerValue
@@ -44,18 +43,18 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.platform.LocalContext
 import com.apdnos.ui.AppTheme
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.Settings
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -76,30 +75,40 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private data class AsmFile(val id: String, val name: String, val content: String)
-
 @Composable
 private fun RootLabScreen() {
     val defaultClang = "/data/user/0/aidepro.top/no_backup/ndksupport-1710240003/android-ndk-aide/toolchains/llvm/prebuilt/linux-aarch64/bin/clang"
     var clangPath by remember { mutableStateOf(defaultClang) }
     var rootStatus by remember { mutableStateOf("检测中...") }
     var outputStatus by remember { mutableStateOf("等待执行") }
+    var showSettings by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
-    val asmFiles = remember { mutableStateListOf<AsmFile>() }
-    var activeFileId by remember { mutableStateOf<String?>(null) }
-    val activeFile = asmFiles.firstOrNull { it.id == activeFileId }
+    val asmFiles = remember { mutableStateListOf<String>() }
+    var activeFileName by remember { mutableStateOf<String?>(null) }
+    var asmSource by remember { mutableStateOf("") }
+    val asmDirectory = remember { File(context.filesDir, "asm") }
 
     LaunchedEffect(Unit) {
-        val seedContent = readAssetText(context, "main.S")
-        val initialFile = AsmFile(
-            id = UUID.randomUUID().toString(),
-            name = "main.S",
-            content = seedContent
-        )
-        asmFiles.add(initialFile)
-        activeFileId = initialFile.id
+        if (!asmDirectory.exists()) {
+            asmDirectory.mkdirs()
+        }
+        val existingFiles = asmDirectory.listFiles { file ->
+            file.isFile && file.extension.equals("S", ignoreCase = true)
+        }.orEmpty().sortedBy { it.name }
+        if (existingFiles.isEmpty()) {
+            val seedContent = readAssetText(context, "main.S")
+            val initialFile = File(asmDirectory, "main.S")
+            initialFile.writeText(seedContent)
+            asmFiles.add(initialFile.name)
+            activeFileName = initialFile.name
+            asmSource = seedContent
+        } else {
+            asmFiles.addAll(existingFiles.map { it.name })
+            activeFileName = existingFiles.first().name
+            asmSource = existingFiles.first().readText()
+        }
         rootStatus = checkRoot()
     }
 
@@ -132,13 +141,12 @@ private fun RootLabScreen() {
                 Button(
                     onClick = {
                         val index = asmFiles.size + 1
-                        val newFile = AsmFile(
-                            id = UUID.randomUUID().toString(),
-                            name = "asm_$index.S",
-                            content = ""
-                        )
-                        asmFiles.add(newFile)
-                        activeFileId = newFile.id
+                        val newFileName = "asm_$index.S"
+                        val newFile = File(asmDirectory, newFileName)
+                        newFile.writeText("")
+                        asmFiles.add(newFileName)
+                        activeFileName = newFileName
+                        asmSource = ""
                         scope.launch { drawerState.close() }
                     },
                     modifier = Modifier.fillMaxWidth()
@@ -156,15 +164,12 @@ private fun RootLabScreen() {
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 } else {
-                    asmFiles.forEach { file ->
-                        val isActive = file.id == activeFileId
+                    asmFiles.forEach { fileName ->
+                        val isActive = fileName == activeFileName
                         Card(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .clickable {
-                                    activeFileId = file.id
-                                    scope.launch { drawerState.close() }
-                                },
+                                .padding(vertical = 2.dp),
                             colors = CardDefaults.cardColors(
                                 containerColor = if (isActive) {
                                     MaterialTheme.colorScheme.primaryContainer
@@ -176,18 +181,22 @@ private fun RootLabScreen() {
                         ) {
                             Column(modifier = Modifier.padding(12.dp)) {
                                 Text(
-                                    text = file.name,
+                                    text = fileName,
                                     style = MaterialTheme.typography.titleSmall.copy(
                                         fontFamily = FontFamily.Monospace,
                                         fontWeight = FontWeight.SemiBold
                                     ),
                                     color = MaterialTheme.colorScheme.onSurface
                                 )
-                                Text(
-                                    text = if (file.content.isBlank()) "空文件" else "包含 ${file.content.length} 字符",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
+                                TextButton(
+                                    onClick = {
+                                        activeFileName = fileName
+                                        asmSource = File(asmDirectory, fileName).readText()
+                                        scope.launch { drawerState.close() }
+                                    }
+                                ) {
+                                    Text(text = if (isActive) "当前文件" else "切换到此文件")
+                                }
                             }
                         }
                     }
@@ -198,18 +207,23 @@ private fun RootLabScreen() {
         Scaffold(
             topBar = {
                 HackerTopBar(
-                    title = activeFile?.name ?: "汇编实验室",
-                    onMenuClick = { scope.launch { drawerState.open() } },
+                    title = activeFileName ?: "汇编实验室",
                     onCompileClick = {
-                        val file = activeFile
-                        if (file == null) {
+                        val fileName = activeFileName
+                        if (fileName == null) {
                             outputStatus = "请先创建汇编文件"
                         } else {
                             scope.launch {
-                                outputStatus = compileAndRun(clangPath, file.content, file.name)
+                                outputStatus = compileAndRun(
+                                    context = context,
+                                    clangPath = clangPath,
+                                    asmSource = asmSource,
+                                    fileName = fileName
+                                )
                             }
                         }
-                    }
+                    },
+                    onSettingsClick = { showSettings = true }
                 )
             }
         ) { padding ->
@@ -219,56 +233,19 @@ private fun RootLabScreen() {
                     .background(MaterialTheme.colorScheme.background)
                     .padding(padding)
                     .padding(16.dp)
-                    .verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
-                Text(
-                    text = "Root 检测与汇编执行",
-                    style = MaterialTheme.typography.headlineSmall.copy(
-                        color = MaterialTheme.colorScheme.primary,
-                        fontWeight = FontWeight.Bold
-                    )
-                )
-                Text(
-                    text = "进入应用时会自动检查 Root 权限，并使用 su 编译执行 ARM64 汇编。",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onBackground
-                )
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "Root 状态: $rootStatus",
-                        color = MaterialTheme.colorScheme.onBackground
-                    )
-                    TextButton(onClick = { scope.launch { rootStatus = checkRoot() } }) {
-                        Text(text = "重新检查")
-                    }
-                }
                 OutlinedTextField(
-                    value = clangPath,
-                    onValueChange = { clangPath = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    label = { Text("clang 路径") },
-                    textStyle = MaterialTheme.typography.bodySmall.copy(
-                        fontFamily = FontFamily.Monospace,
-                        color = MaterialTheme.colorScheme.onBackground
-                    ),
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done)
-                )
-                OutlinedTextField(
-                    value = activeFile?.content ?: "",
+                    value = asmSource,
                     onValueChange = { updated ->
-                        val index = asmFiles.indexOfFirst { it.id == activeFileId }
-                        if (index != -1) {
-                            asmFiles[index] = asmFiles[index].copy(content = updated)
+                        asmSource = updated
+                        val fileName = activeFileName ?: return@OutlinedTextField
+                        scope.launch(Dispatchers.IO) {
+                            File(asmDirectory, fileName).writeText(updated)
                         }
                     },
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(260.dp),
+                        .weight(1f),
                     label = { Text("ARM64 汇编源码") },
                     textStyle = MaterialTheme.typography.bodySmall.copy(
                         fontFamily = FontFamily.Monospace,
@@ -276,13 +253,19 @@ private fun RootLabScreen() {
                     ),
                     singleLine = false
                 )
-                Text(
-                    text = outputStatus,
-                    color = MaterialTheme.colorScheme.onBackground,
-                    fontFamily = FontFamily.Monospace
-                )
             }
         }
+    }
+
+    if (showSettings) {
+        SettingsDialog(
+            clangPath = clangPath,
+            onClangPathChange = { clangPath = it },
+            rootStatus = rootStatus,
+            outputStatus = outputStatus,
+            onRecheckRoot = { scope.launch { rootStatus = checkRoot() } },
+            onDismiss = { showSettings = false }
+        )
     }
 }
 
@@ -290,8 +273,8 @@ private fun RootLabScreen() {
 @Composable
 private fun HackerTopBar(
     title: String,
-    onMenuClick: () -> Unit,
-    onCompileClick: () -> Unit
+    onCompileClick: () -> Unit,
+    onSettingsClick: () -> Unit
 ) {
     TopAppBar(
         navigationIcon = {
@@ -311,6 +294,70 @@ private fun HackerTopBar(
             TextButton(onClick = onCompileClick) {
                 Text(text = "编译并运行")
             }
+            IconButton(onClick = onSettingsClick) {
+                Icon(imageVector = Icons.Default.Settings, contentDescription = "设置")
+            }
+        }
+    )
+}
+
+@Composable
+private fun SettingsDialog(
+    clangPath: String,
+    onClangPathChange: (String) -> Unit,
+    rootStatus: String,
+    outputStatus: String,
+    onRecheckRoot: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text(text = "完成")
+            }
+        },
+        title = {
+            Text(text = "设置")
+        },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(text = "Root 状态: $rootStatus")
+                    TextButton(onClick = onRecheckRoot) {
+                        Text(text = "重新检查")
+                    }
+                }
+                OutlinedTextField(
+                    value = clangPath,
+                    onValueChange = onClangPathChange,
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("clang 路径") },
+                    textStyle = MaterialTheme.typography.bodySmall.copy(
+                        fontFamily = FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.onBackground
+                    ),
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done)
+                )
+                Text(
+                    text = "输出日志",
+                    style = MaterialTheme.typography.titleSmall.copy(
+                        fontWeight = FontWeight.SemiBold
+                    )
+                )
+                Text(
+                    text = outputStatus,
+                    color = MaterialTheme.colorScheme.onBackground,
+                    fontFamily = FontFamily.Monospace
+                )
+            }
         }
     )
 }
@@ -325,16 +372,25 @@ private suspend fun checkRoot(): String = withContext(Dispatchers.IO) {
     }
 }
 
-private suspend fun compileAndRun(clangPath: String, asmSource: String, fileName: String): String =
+private suspend fun compileAndRun(
+    context: android.content.Context,
+    clangPath: String,
+    asmSource: String,
+    fileName: String
+): String =
     withContext(Dispatchers.IO) {
         AdosLogger.d("Starting compileAndRun")
+        val privateDir = File(context.filesDir, "asm")
         val workDir = File("/data/local/tmp/APDNOS")
         try {
+            if (!privateDir.exists()) {
+                privateDir.mkdirs()
+            }
             if (!workDir.exists()) {
                 workDir.mkdirs()
             }
             val safeBaseName = sanitizeFileBase(fileName)
-            val sourceFile = File(workDir, "$safeBaseName.S")
+            val sourceFile = File(privateDir, "$safeBaseName.S")
             val outputFile = File(workDir, "$safeBaseName.out")
             sourceFile.writeText(asmSource)
 
