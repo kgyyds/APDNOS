@@ -13,9 +13,11 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.BottomSheetDefaults
 import androidx.compose.material3.BottomSheetScaffold
@@ -23,22 +25,16 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalDrawerSheet
-import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.SheetValue
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.rememberBottomSheetScaffoldState
-import androidx.compose.material3.rememberStandardBottomSheetState
-import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -47,8 +43,10 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontFamily
@@ -61,8 +59,13 @@ import com.apdnos.ui.AppTheme
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.foundation.layout.fillMaxHeight
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -91,21 +94,30 @@ private fun RootLabScreen() {
     var rootStatus by remember { mutableStateOf("检测中...") }
     var outputStatus by remember { mutableStateOf("等待执行") }
     var showSettings by remember { mutableStateOf(false) }
+    var isSidebarOpen by remember { mutableStateOf(true) }
+    var isConsoleExpanded by remember { mutableStateOf(true) }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
-    val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val asmFiles = remember { mutableStateListOf<String>() }
     var activeFileName by remember { mutableStateOf<String?>(null) }
     var asmSource by remember { mutableStateOf("") }
     val asmDirectory = remember { File(context.filesDir, "asm") }
     val editorScrollState = rememberScrollState()
-    val bottomSheetState = rememberStandardBottomSheetState(
-        initialValue = SheetValue.PartiallyExpanded,
-        skipHiddenState = false
+    val consoleScrollState = rememberScrollState()
+    val sidebarWidth by animateDpAsState(
+        targetValue = if (isSidebarOpen) 260.dp else 0.dp,
+        label = "sidebarWidth"
     )
-    val bottomSheetScaffoldState = rememberBottomSheetScaffoldState(
-        bottomSheetState = bottomSheetState
+    val consoleHeight by animateDpAsState(
+        targetValue = if (isConsoleExpanded) 220.dp else 56.dp,
+        label = "consoleHeight"
     )
+    val lineNumbers by remember(asmSource) {
+        derivedStateOf {
+            val lineCount = asmSource.lineSequence().count().coerceAtLeast(1)
+            (1..lineCount).joinToString("\n") { it.toString() }
+        }
+    }
 
     LaunchedEffect(Unit) {
         if (!asmDirectory.exists()) {
@@ -129,18 +141,43 @@ private fun RootLabScreen() {
         rootStatus = checkRoot()
     }
 
-    ModalNavigationDrawer(
-        drawerState = drawerState,
-        drawerContent = {
-            ModalDrawerSheet(
-                modifier = Modifier.fillMaxSize(),
-                drawerShape = RoundedCornerShape(0.dp),
-                drawerContainerColor = MaterialTheme.colorScheme.background,
-                drawerTonalElevation = 0.dp
-            ) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
+    ) {
+        HackerTopBar(
+            title = activeFileName ?: "汇编实验室",
+            onCompileClick = {
+                val fileName = activeFileName
+                if (fileName == null) {
+                    outputStatus = "请先创建汇编文件"
+                } else {
+                    scope.launch {
+                        outputStatus = compileAndRun(
+                            context = context,
+                            clangPath = clangPath,
+                            asmSource = asmSource,
+                            fileName = fileName
+                        )
+                        isConsoleExpanded = true
+                    }
+                }
+            },
+            onMenuClick = { isSidebarOpen = !isSidebarOpen },
+            onSettingsClick = { showSettings = true }
+        )
+        Row(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+        ) {
+            AnimatedVisibility(visible = isSidebarOpen) {
                 Column(
                     modifier = Modifier
-                        .fillMaxSize()
+                        .width(sidebarWidth)
+                        .fillMaxHeight()
+                        .background(MaterialTheme.colorScheme.surface)
                         .padding(16.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
@@ -156,7 +193,7 @@ private fun RootLabScreen() {
                                 color = MaterialTheme.colorScheme.primary
                             )
                         )
-                        IconButton(onClick = { scope.launch { drawerState.close() } }) {
+                        IconButton(onClick = { isSidebarOpen = false }) {
                             Icon(imageVector = Icons.Default.Close, contentDescription = "关闭侧栏")
                         }
                     }
@@ -169,7 +206,6 @@ private fun RootLabScreen() {
                             asmFiles.add(newFileName)
                             activeFileName = newFileName
                             asmSource = ""
-                            scope.launch { drawerState.close() }
                         },
                         modifier = Modifier.fillMaxWidth()
                     ) {
@@ -214,7 +250,6 @@ private fun RootLabScreen() {
                                         onClick = {
                                             activeFileName = fileName
                                             asmSource = File(asmDirectory, fileName).readText()
-                                            scope.launch { drawerState.close() }
                                         }
                                     ) {
                                         Text(text = if (isActive) "当前文件" else "切换到此文件")
@@ -225,58 +260,18 @@ private fun RootLabScreen() {
                     }
                 }
             }
-        }
-    ) {
-        BottomSheetScaffold(
-            scaffoldState = bottomSheetScaffoldState,
-            sheetPeekHeight = 72.dp,
-            sheetContent = {
-                ConsoleSheet(
-                    outputStatus = outputStatus
-                )
-            },
-            topBar = {
-                HackerTopBar(
-                    title = activeFileName ?: "汇编实验室",
-                    onCompileClick = {
-                        val fileName = activeFileName
-                        if (fileName == null) {
-                            outputStatus = "请先创建汇编文件"
-                            scope.launch {
-                                bottomSheetState.partialExpand()
-                            }
-                        } else {
-                            scope.launch {
-                                outputStatus = compileAndRun(
-                                    context = context,
-                                    clangPath = clangPath,
-                                    asmSource = asmSource,
-                                    fileName = fileName
-                                )
-                                bottomSheetState.expand()
-                            }
-                        }
-                    },
-                    onMenuClick = { scope.launch { drawerState.open() } },
-                    onSettingsClick = { showSettings = true }
-                )
-            }
-        ) { padding ->
             Column(
                 modifier = Modifier
-                    .fillMaxSize()
-                    .background(MaterialTheme.colorScheme.background)
-                    .padding(padding)
+                    .weight(1f)
+                    .fillMaxHeight()
                     .padding(16.dp)
             ) {
-                val lineCount = asmSource.lineSequence().count().coerceAtLeast(1)
-                val lineNumbers = (1..lineCount).joinToString("\n") { it.toString() }
                 Row(
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(1f)
+                        .fillMaxSize()
                         .verticalScroll(editorScrollState)
                         .background(MaterialTheme.colorScheme.surfaceVariant)
+                        .clip(RoundedCornerShape(12.dp))
                         .padding(8.dp)
                 ) {
                     Text(
@@ -311,6 +306,13 @@ private fun RootLabScreen() {
                 }
             }
         }
+        ConsoleSheet(
+            outputStatus = outputStatus,
+            isExpanded = isConsoleExpanded,
+            onToggle = { isConsoleExpanded = !isConsoleExpanded },
+            scrollState = consoleScrollState,
+            height = consoleHeight
+        )
     }
 
     if (showSettings) {
@@ -404,6 +406,61 @@ private fun SettingsDialog(
             }
         }
     )
+}
+
+@Composable
+private fun ConsoleSheet(
+    outputStatus: String,
+    isExpanded: Boolean,
+    onToggle: () -> Unit,
+    scrollState: androidx.compose.foundation.ScrollState,
+    height: androidx.compose.ui.unit.Dp
+) {
+    LaunchedEffect(outputStatus) {
+        scrollState.scrollTo(scrollState.maxValue)
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(height)
+            .background(MaterialTheme.colorScheme.surface)
+            .padding(horizontal = 16.dp, vertical = 12.dp)
+            .imePadding()
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "输出日志",
+                style = MaterialTheme.typography.titleSmall.copy(
+                    fontWeight = FontWeight.SemiBold
+                )
+            )
+            IconButton(onClick = onToggle) {
+                val icon = if (isExpanded) Icons.Default.KeyboardArrowDown else Icons.Default.KeyboardArrowUp
+                val desc = if (isExpanded) "收起控制台" else "展开控制台"
+                Icon(imageVector = icon, contentDescription = desc)
+            }
+        }
+        Spacer(modifier = Modifier.height(8.dp))
+        SelectionContainer {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f, fill = true)
+                    .verticalScroll(scrollState)
+            ) {
+                Text(
+                    text = outputStatus,
+                    color = MaterialTheme.colorScheme.onBackground,
+                    fontFamily = FontFamily.Monospace
+                )
+            }
+        }
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
