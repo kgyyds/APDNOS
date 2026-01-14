@@ -5,6 +5,7 @@ import android.view.KeyEvent as AndroidKeyEvent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -21,8 +22,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.BottomSheetDefaults
-import androidx.compose.material3.BottomSheetScaffold
+import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
@@ -89,6 +89,10 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.distinctUntilChanged
 import java.io.File
 import java.util.UUID
+import com.apdnos.clang.ClangInstaller
+import com.apdnos.clang.DiagnosticsController
+import com.apdnos.clang.Diagnostic
+import com.apdnos.clang.DiagnosticSeverity
 import com.apdnos.editor.CompletionEngine
 import com.apdnos.editor.CompletionItem
 import com.apdnos.editor.CompletionPopup
@@ -112,7 +116,8 @@ class MainActivity : ComponentActivity() {
 @OptIn(FlowPreview::class)
 @Composable
 private fun RootLabScreen() {
-    val defaultClang = "/data/user/0/aidepro.top/no_backup/ndksupport-1710240003/android-ndk-aide/toolchains/llvm/prebuilt/linux-aarch64/bin/clang"
+    val context = LocalContext.current
+    val defaultClang = remember(context) { File(context.filesDir, "clang/bin/clang").absolutePath }
     var clangPath by remember { mutableStateOf(defaultClang) }
     var rootStatus by remember { mutableStateOf("检测中...") }
     var outputStatus by remember { mutableStateOf("等待执行") }
@@ -120,7 +125,6 @@ private fun RootLabScreen() {
     var isSidebarOpen by remember { mutableStateOf(true) }
     var isConsoleExpanded by remember { mutableStateOf(true) }
     val scope = rememberCoroutineScope()
-    val context = LocalContext.current
     val asmFiles = remember { mutableStateListOf<String>() }
     var activeFileName by remember { mutableStateOf<String?>(null) }
     var asmSource by remember { mutableStateOf(TextFieldValue("")) }
@@ -131,6 +135,8 @@ private fun RootLabScreen() {
     var completionOffset by remember { mutableStateOf(IntOffset.Zero) }
     var completionMaxSize by remember { mutableStateOf(IntSize.Zero) }
     val editorController = remember { EditorController(scope) }
+    val diagnosticsController = remember { DiagnosticsController(context, scope) }
+    val diagnosticsState by diagnosticsController.state.collectAsState()
     val completionState by editorController.completionState.collectAsState()
     val registerUsage by editorController.registerUsage.collectAsState()
     val completionVisible = completionState.isVisible && completionState.items.isNotEmpty()
@@ -161,6 +167,7 @@ private fun RootLabScreen() {
 
     LaunchedEffect(Unit) {
         editorController.start()
+        diagnosticsController.start { File(clangPath).takeIf { it.exists() } }
         if (!asmDirectory.exists()) {
             asmDirectory.mkdirs()
         }
@@ -180,7 +187,9 @@ private fun RootLabScreen() {
             val content = existingFiles.first().readText()
             asmSource = TextFieldValue(content, selection = TextRange(content.length))
         }
+        clangPath = ClangInstaller.installIfNeeded(context).absolutePath
         editorController.onEditorChange(asmSource.text, asmSource.selection.start)
+        diagnosticsController.onEditorChange(asmSource.text)
         rootStatus = checkRoot()
     }
 
@@ -280,6 +289,7 @@ private fun RootLabScreen() {
                             activeFileName = newFileName
                             asmSource = TextFieldValue("")
                             editorController.onEditorChange("", 0)
+                            diagnosticsController.onEditorChange("")
                         },
                         modifier = Modifier.fillMaxWidth()
                     ) {
@@ -326,6 +336,7 @@ private fun RootLabScreen() {
                                             val content = File(asmDirectory, fileName).readText()
                                             asmSource = TextFieldValue(content, selection = TextRange(content.length))
                                             editorController.onEditorChange(content, content.length)
+                                            diagnosticsController.onEditorChange(content)
                                         }
                                     ) {
                                         Text(text = if (isActive) "当前文件" else "切换到此文件")
@@ -351,7 +362,8 @@ private fun RootLabScreen() {
 
                 Box(
                     modifier = Modifier
-                        .fillMaxSize()
+                        .weight(1f)
+                        .fillMaxWidth()
                         .background(MaterialTheme.colorScheme.surfaceVariant)
                         .clip(RoundedCornerShape(12.dp))
                         .padding(editorPadding)
@@ -387,6 +399,7 @@ private fun RootLabScreen() {
                                     editorController.hideCompletion()
                                 }
                                 editorController.onEditorChange(updated.text, updated.selection.start)
+                                diagnosticsController.onEditorChange(updated.text)
                             },
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -490,6 +503,15 @@ private fun RootLabScreen() {
                         )
                     }
                 }
+                DiagnosticsPanel(
+                    diagnostics = diagnosticsState.diagnostics,
+                    isRunning = diagnosticsState.isRunning,
+                    onSelect = { diagnostic ->
+                        val offset = findOffsetForLine(asmSource.text, diagnostic.line, diagnostic.column)
+                        asmSource = asmSource.copy(selection = TextRange(offset))
+                        editorController.onEditorChange(asmSource.text, offset)
+                    }
+                )
             }
         }
         RegisterBar(
@@ -650,6 +672,87 @@ private fun ConsoleSheet(
             }
         }
     }
+}
+
+@Composable
+private fun DiagnosticsPanel(
+    diagnostics: List<Diagnostic>,
+    isRunning: Boolean,
+    onSelect: (Diagnostic) -> Unit
+) {
+    val background = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.9f)
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(120.dp)
+            .padding(top = 12.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(background)
+            .padding(8.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "诊断",
+                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+                color = MaterialTheme.colorScheme.primary
+            )
+            if (isRunning) {
+                Text(
+                    text = "分析中…",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+        Spacer(modifier = Modifier.height(6.dp))
+        if (diagnostics.isEmpty()) {
+            Text(
+                text = "无诊断信息",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        } else {
+            androidx.compose.foundation.lazy.LazyColumn(
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                items(diagnostics.take(6)) { diag ->
+                    val color = when (diag.severity) {
+                        DiagnosticSeverity.ERROR -> MaterialTheme.colorScheme.error
+                        DiagnosticSeverity.WARNING -> MaterialTheme.colorScheme.tertiary
+                        DiagnosticSeverity.NOTE -> MaterialTheme.colorScheme.primary
+                    }
+                    Text(
+                        text = "${diag.line}:${diag.column} ${diag.message}",
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp)
+                            .clickable { onSelect(diag) },
+                        color = color,
+                        fontFamily = FontFamily.Monospace,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            }
+        }
+    }
+}
+
+private fun findOffsetForLine(text: String, line: Int, column: Int): Int {
+    if (line <= 0) return 0
+    var currentLine = 1
+    var index = 0
+    while (index < text.length && currentLine < line) {
+        if (text[index] == '\n') {
+            currentLine += 1
+        }
+        index += 1
+    }
+    val targetIndex = (index + column - 1).coerceIn(0, text.length)
+    return targetIndex
 }
 
 private fun applyCompletion(
