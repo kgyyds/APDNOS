@@ -83,6 +83,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun RootLabScreen() {
     val defaultClang = "/data/user/0/aidepro.top/no_backup/ndksupport-1710240003/android-ndk-aide/toolchains/llvm/prebuilt/linux-aarch64/bin/clang"
