@@ -1,10 +1,12 @@
 package com.apdnos
 
 import android.os.Bundle
+import android.view.KeyEvent as AndroidKeyEvent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -35,19 +37,27 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -66,11 +76,24 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import java.io.File
 import java.util.UUID
+import com.apdnos.editor.CompletionEngine
+import com.apdnos.editor.CompletionItem
+import com.apdnos.editor.CompletionPopup
+import com.apdnos.editor.RegisterBar
+import com.apdnos.editor.RegisterScanner
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -86,7 +109,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(FlowPreview::class)
 @Composable
 private fun RootLabScreen() {
     val defaultClang = "/data/user/0/aidepro.top/no_backup/ndksupport-1710240003/android-ndk-aide/toolchains/llvm/prebuilt/linux-aarch64/bin/clang"
@@ -100,10 +123,17 @@ private fun RootLabScreen() {
     val context = LocalContext.current
     val asmFiles = remember { mutableStateListOf<String>() }
     var activeFileName by remember { mutableStateOf<String?>(null) }
-    var asmSource by remember { mutableStateOf("") }
+    var asmSource by remember { mutableStateOf(TextFieldValue("")) }
     val asmDirectory = remember { File(context.filesDir, "asm") }
     val editorScrollState = rememberScrollState()
     val consoleScrollState = rememberScrollState()
+    val focusRequester = remember { FocusRequester() }
+    var editorSize by remember { mutableStateOf(IntSize.Zero) }
+    var completionItems by remember { mutableStateOf<List<CompletionItem>>(emptyList()) }
+    var completionRange by remember { mutableStateOf<IntRange?>(null) }
+    var completionVisible by remember { mutableStateOf(false) }
+    var selectedCompletionIndex by remember { mutableIntStateOf(0) }
+    var registerUsage by remember { mutableStateOf(RegisterScanner.emptyUsage()) }
     val sidebarWidth by animateDpAsState(
         targetValue = if (isSidebarOpen) 260.dp else 0.dp,
         label = "sidebarWidth"
@@ -112,9 +142,9 @@ private fun RootLabScreen() {
         targetValue = if (isConsoleExpanded) 220.dp else 56.dp,
         label = "consoleHeight"
     )
-    val lineNumbers by remember(asmSource) {
+    val lineNumbers by remember(asmSource.text) {
         derivedStateOf {
-            val lineCount = asmSource.lineSequence().count().coerceAtLeast(1)
+            val lineCount = asmSource.text.lineSequence().count().coerceAtLeast(1)
             (1..lineCount).joinToString("\n") { it.toString() }
         }
     }
@@ -132,13 +162,44 @@ private fun RootLabScreen() {
             initialFile.writeText(seedContent)
             asmFiles.add(initialFile.name)
             activeFileName = initialFile.name
-            asmSource = seedContent
+            asmSource = TextFieldValue(seedContent, selection = TextRange(seedContent.length))
         } else {
             asmFiles.addAll(existingFiles.map { it.name })
             activeFileName = existingFiles.first().name
-            asmSource = existingFiles.first().readText()
+            val content = existingFiles.first().readText()
+            asmSource = TextFieldValue(content, selection = TextRange(content.length))
         }
         rootStatus = checkRoot()
+    }
+
+    LaunchedEffect(Unit) {
+        snapshotFlow { asmSource }
+            .debounce(150)
+            .map { it.text to it.selection.start }
+            .distinctUntilChanged()
+            .collect { (text, cursor) ->
+                val result = CompletionEngine.compute(text, cursor)
+                if (result == null || result.items.isEmpty()) {
+                    completionVisible = false
+                    completionItems = emptyList()
+                    completionRange = null
+                    selectedCompletionIndex = 0
+                } else {
+                    completionItems = result.items
+                    completionRange = result.tokenRange
+                    completionVisible = true
+                    selectedCompletionIndex = 0
+                }
+            }
+    }
+
+    LaunchedEffect(Unit) {
+        snapshotFlow { asmSource.text }
+            .debounce(180)
+            .distinctUntilChanged()
+            .collect { text ->
+                registerUsage = RegisterScanner.scan(text)
+            }
     }
 
     Column(
@@ -157,7 +218,7 @@ private fun RootLabScreen() {
                         outputStatus = compileAndRun(
                             context = context,
                             clangPath = clangPath,
-                            asmSource = asmSource,
+                            asmSource = asmSource.text,
                             fileName = fileName
                         )
                         isConsoleExpanded = true
@@ -205,7 +266,7 @@ private fun RootLabScreen() {
                             newFile.writeText("")
                             asmFiles.add(newFileName)
                             activeFileName = newFileName
-                            asmSource = ""
+                            asmSource = TextFieldValue("")
                         },
                         modifier = Modifier.fillMaxWidth()
                     ) {
@@ -249,7 +310,8 @@ private fun RootLabScreen() {
                                     TextButton(
                                         onClick = {
                                             activeFileName = fileName
-                                            asmSource = File(asmDirectory, fileName).readText()
+                                            val content = File(asmDirectory, fileName).readText()
+                                            asmSource = TextFieldValue(content, selection = TextRange(content.length))
                                         }
                                     ) {
                                         Text(text = if (isActive) "当前文件" else "切换到此文件")
@@ -266,46 +328,148 @@ private fun RootLabScreen() {
                     .fillMaxHeight()
                     .padding(16.dp)
             ) {
-                Row(
+                val density = LocalDensity.current
+                val lineNumberWidth = 48.dp
+                val lineNumberPadding = 8.dp
+                val editorPadding = 8.dp
+                val fontSize = MaterialTheme.typography.bodySmall.fontSize
+                val lineHeight = MaterialTheme.typography.bodySmall.lineHeight.takeIf { it != androidx.compose.ui.unit.TextUnit.Unspecified }
+                    ?: (fontSize * 1.4f)
+                val charWidthPx = with(density) { fontSize.toPx() * 0.6f }
+                val lineHeightPx = with(density) { lineHeight.toPx() }
+                val popupGapPx = with(density) { 8.dp.toPx() }
+                val lineNumberWidthPx = with(density) { lineNumberWidth.toPx() }
+                val lineNumberPaddingPx = with(density) { lineNumberPadding.toPx() }
+                val editorPaddingPx = with(density) { editorPadding.toPx() }
+                val maxPopupWidthPx = with(density) { 320.dp.toPx() }
+                val maxPopupHeightPx = with(density) { 240.dp.toPx() }
+                val rowHeightPx = with(density) { 32.dp.toPx() }
+
+                Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .verticalScroll(editorScrollState)
                         .background(MaterialTheme.colorScheme.surfaceVariant)
                         .clip(RoundedCornerShape(12.dp))
-                        .padding(8.dp)
+                        .padding(editorPadding)
+                        .onSizeChanged { editorSize = it }
                 ) {
-                    Text(
-                        text = lineNumbers,
+                    Row(
                         modifier = Modifier
-                            .width(48.dp)
-                            .padding(end = 8.dp),
-                        style = MaterialTheme.typography.bodySmall.copy(
-                            fontFamily = FontFamily.Monospace,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        ),
-                        textAlign = TextAlign.End
-                    )
-                    OutlinedTextField(
-                        value = asmSource,
-                        onValueChange = { updated ->
-                            asmSource = updated
-                            val fileName = activeFileName ?: return@OutlinedTextField
-                            scope.launch(Dispatchers.IO) {
-                                File(asmDirectory, fileName).writeText(updated)
+                            .fillMaxSize()
+                            .verticalScroll(editorScrollState)
+                    ) {
+                        Text(
+                            text = lineNumbers,
+                            modifier = Modifier
+                                .width(lineNumberWidth)
+                                .padding(end = lineNumberPadding),
+                            style = MaterialTheme.typography.bodySmall.copy(
+                                fontFamily = FontFamily.Monospace,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            ),
+                            textAlign = TextAlign.End
+                        )
+                        OutlinedTextField(
+                            value = asmSource,
+                            onValueChange = { updated ->
+                                val previousText = asmSource.text
+                                asmSource = updated
+                                val fileName = activeFileName ?: return@OutlinedTextField
+                                scope.launch(Dispatchers.IO) {
+                                    File(asmDirectory, fileName).writeText(updated.text)
+                                }
+                                val insertedChar = CompletionEngine.detectInsertedChar(previousText, updated.text)
+                                if (insertedChar != null && CompletionEngine.shouldHideOnChar(insertedChar)) {
+                                    completionVisible = false
+                                }
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .focusRequester(focusRequester)
+                                .onPreviewKeyEvent { event ->
+                                    if (!completionVisible || completionItems.isEmpty()) {
+                                        return@onPreviewKeyEvent false
+                                    }
+                                    if (event.nativeKeyEvent.action != AndroidKeyEvent.ACTION_DOWN) {
+                                        return@onPreviewKeyEvent false
+                                    }
+                                    when (event.nativeKeyEvent.keyCode) {
+                                        AndroidKeyEvent.KEYCODE_DPAD_DOWN -> {
+                                            selectedCompletionIndex = (selectedCompletionIndex + 1) % completionItems.size
+                                            true
+                                        }
+                                        AndroidKeyEvent.KEYCODE_DPAD_UP -> {
+                                            selectedCompletionIndex =
+                                                (selectedCompletionIndex - 1 + completionItems.size) % completionItems.size
+                                            true
+                                        }
+                                        AndroidKeyEvent.KEYCODE_ENTER,
+                                        AndroidKeyEvent.KEYCODE_TAB -> {
+                                            applyCompletion(
+                                                asmSource,
+                                                completionItems[selectedCompletionIndex],
+                                                completionRange
+                                            ) { newValue ->
+                                                asmSource = newValue
+                                            }
+                                            completionVisible = false
+                                            true
+                                        }
+                                        AndroidKeyEvent.KEYCODE_ESCAPE,
+                                        AndroidKeyEvent.KEYCODE_BACK -> {
+                                            completionVisible = false
+                                            true
+                                        }
+                                        else -> false
+                                    }
+                                },
+                            label = { Text("ARM64 汇编源码") },
+                            textStyle = MaterialTheme.typography.bodySmall.copy(
+                                fontFamily = FontFamily.Monospace,
+                                color = MaterialTheme.colorScheme.onBackground
+                            ),
+                            singleLine = false,
+                            maxLines = Int.MAX_VALUE
+                        )
+                    }
+                    if (completionVisible && completionItems.isNotEmpty() && completionRange != null) {
+                        val cursor = asmSource.selection.start.coerceIn(0, asmSource.text.length)
+                        val textBeforeCursor = asmSource.text.take(cursor)
+                        val lineIndex = textBeforeCursor.count { it == '\n' }
+                        val columnIndex = cursor - (textBeforeCursor.lastIndexOf('\n') + 1).coerceAtLeast(0)
+                        val caretX = editorPaddingPx + lineNumberWidthPx + lineNumberPaddingPx + (columnIndex * charWidthPx)
+                        val caretY = editorPaddingPx + (lineIndex * lineHeightPx) - editorScrollState.value
+                        val popupWidthPx = minOf(editorSize.width * 0.7f, maxPopupWidthPx)
+                        val estimatedPopupHeightPx =
+                            minOf(maxPopupHeightPx, rowHeightPx * completionItems.size.coerceAtMost(10))
+                        val shouldShowAbove = caretY + lineHeightPx + popupGapPx + estimatedPopupHeightPx > editorSize.height
+                        val rawPopupY = if (shouldShowAbove) {
+                            caretY - estimatedPopupHeightPx - popupGapPx
+                        } else {
+                            caretY + lineHeightPx + popupGapPx
+                        }
+                        val popupX = caretX.coerceIn(0f, editorSize.width - popupWidthPx)
+                        val popupY = rawPopupY.coerceIn(0f, editorSize.height - estimatedPopupHeightPx)
+                        CompletionPopup(
+                            items = completionItems,
+                            selectedIndex = selectedCompletionIndex,
+                            maxWidth = with(density) { popupWidthPx.toDp() },
+                            maxHeight = with(density) { estimatedPopupHeightPx.toDp() },
+                            offset = IntOffset(popupX.toInt(), popupY.toInt()),
+                            onSelect = { item ->
+                                applyCompletion(asmSource, item, completionRange) { newValue ->
+                                    asmSource = newValue
+                                }
+                                completionVisible = false
                             }
-                        },
-                        modifier = Modifier.fillMaxWidth(),
-                        label = { Text("ARM64 汇编源码") },
-                        textStyle = MaterialTheme.typography.bodySmall.copy(
-                            fontFamily = FontFamily.Monospace,
-                            color = MaterialTheme.colorScheme.onBackground
-                        ),
-                        singleLine = false,
-                        maxLines = Int.MAX_VALUE
-                    )
+                        )
+                    }
                 }
             }
         }
+        RegisterBar(
+            usage = registerUsage
+        )
         ConsoleSheet(
             outputStatus = outputStatus,
             isExpanded = isConsoleExpanded,
@@ -463,30 +627,29 @@ private fun ConsoleSheet(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun ConsoleSheet(outputStatus: String) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(MaterialTheme.colorScheme.surface)
-            .padding(horizontal = 16.dp, vertical = 12.dp)
-    ) {
-        BottomSheetDefaults.DragHandle()
-        Spacer(modifier = Modifier.height(8.dp))
-        Text(
-            text = "输出日志",
-            style = MaterialTheme.typography.titleSmall.copy(
-                fontWeight = FontWeight.SemiBold
-            )
-        )
-        Spacer(modifier = Modifier.height(8.dp))
-        Text(
-            text = outputStatus,
-            color = MaterialTheme.colorScheme.onBackground,
-            fontFamily = FontFamily.Monospace
-        )
+private fun applyCompletion(
+    current: TextFieldValue,
+    item: CompletionItem,
+    tokenRange: IntRange?,
+    onUpdate: (TextFieldValue) -> Unit
+) {
+    if (tokenRange == null) return
+    val start = tokenRange.first.coerceAtLeast(0)
+    val end = (tokenRange.last + 1).coerceAtMost(current.text.length)
+    val insertion = buildString {
+        append(item.insertText)
+        if (item.trailingSpace) {
+            append(' ')
+        }
     }
+    val newText = current.text.replaceRange(start, end, insertion)
+    val cursor = (start + insertion.length).coerceIn(0, newText.length)
+    onUpdate(
+        current.copy(
+            text = newText,
+            selection = TextRange(cursor)
+        )
+    )
 }
 
 private suspend fun checkRoot(): String = withContext(Dispatchers.IO) {
