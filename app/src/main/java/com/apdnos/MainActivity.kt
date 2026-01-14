@@ -1,7 +1,6 @@
 package com.apdnos
 
 import android.os.Bundle
-import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
@@ -55,7 +54,6 @@ import java.io.File
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        Log.i("ADOS", "MainActivity onCreate")
         setContent {
             AppTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
@@ -303,7 +301,6 @@ private fun HackerTopBar(title: String) {
 }
 
 private suspend fun checkRoot(): String = withContext(Dispatchers.IO) {
-    Log.d("ADOS", "Running root check")
     val result = runCommand(listOf("su", "-c", "id"))
     if (result.exitCode == 0 && result.stdout.contains("uid=0")) {
         "已获取 root 权限"
