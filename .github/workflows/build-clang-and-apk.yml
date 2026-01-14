@@ -1,0 +1,152 @@
+name: build-clang-and-apk
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "**/*.kt"
+      - "**/*.kts"
+      - "**/*.gradle"
+      - ".github/workflows/build-clang-and-apk.yml"
+      - "build/llvm.version"
+
+jobs:
+  build_clang:
+    runs-on: ubuntu-latest
+    outputs:
+      llvm_commit: ${{ steps.llvm_version.outputs.llvm_commit }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read LLVM version
+        id: llvm_version
+        run: |
+          source build/llvm.version
+          echo "llvm_commit=${LLVM_COMMIT}" >> "$GITHUB_OUTPUT"
+          echo "ndk_version=${NDK_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "android_api=${ANDROID_API}" >> "$GITHUB_OUTPUT"
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build cmake ccache zstd
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "17"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK
+        run: |
+          sdkmanager --install "ndk;${{ steps.llvm_version.outputs.ndk_version }}"
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/${{ steps.llvm_version.outputs.ndk_version }}" >> $GITHUB_ENV
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: clang-ccache-${{ runner.os }}-${{ steps.llvm_version.outputs.llvm_commit }}
+          restore-keys: |
+            clang-ccache-${{ runner.os }}-
+
+      - name: Clone LLVM
+        run: |
+          git clone --depth 1 https://github.com/llvm/llvm-project.git llvm-project
+          cd llvm-project
+          git fetch --depth 1 origin ${{ steps.llvm_version.outputs.llvm_commit }}
+          git checkout ${{ steps.llvm_version.outputs.llvm_commit }}
+
+      - name: Build clang (android arm64)
+        env:
+          CCACHE_DIR: ~/.ccache
+          CCACHE_COMPRESS: "true"
+          CCACHE_MAXSIZE: 2G
+        run: |
+          mkdir -p llvm-project/build
+          cd llvm-project/build
+          cmake -G Ninja ../llvm \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-${{ steps.llvm_version.outputs.android_api }} \
+            -DLLVM_ENABLE_PROJECTS=clang \
+            -DLLVM_TARGETS_TO_BUILD=AArch64 \
+            -DLLVM_INCLUDE_TESTS=OFF \
+            -DLLVM_INCLUDE_EXAMPLES=OFF \
+            -DLLVM_INCLUDE_BENCHMARKS=OFF \
+            -DLLVM_ENABLE_TERMINFO=OFF \
+            -DLLVM_ENABLE_ZSTD=OFF \
+            -DLLVM_ENABLE_LIBXML2=OFF \
+            -DLLVM_ENABLE_LIBEDIT=OFF \
+            -DLLVM_ENABLE_ZLIB=OFF \
+            -DLLVM_BUILD_LLVM_DYLIB=OFF \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          ninja clang
+
+      - name: Package clang assets
+        run: |
+          cd llvm-project/build
+          mkdir -p clang-dist/bin clang-dist/lib
+          cp bin/clang clang-dist/bin/
+          cp -r lib/clang clang-dist/lib/
+          echo "${{ steps.llvm_version.outputs.llvm_commit }}" > clang-dist/llvm.version
+          ${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip clang-dist/bin/clang
+          tar -I 'zstd -19' -cf clang-android-arm64.tar.zst clang-dist
+
+      - name: Upload clang artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: clang-android-arm64
+          path: llvm-project/build/clang-android-arm64.tar.zst
+
+  build_apk:
+    runs-on: ubuntu-latest
+    needs: build_clang
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "17"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK
+        run: |
+          source build/llvm.version
+          sdkmanager --install "ndk;${NDK_VERSION}"
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}" >> $GITHUB_ENV
+
+      - name: Download clang artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: clang-android-arm64
+          path: clang-artifact
+
+      - name: Unpack clang assets
+        run: |
+          mkdir -p build/clang-assets
+          tar -I zstd -xf clang-artifact/clang-android-arm64.tar.zst -C build/clang-assets
+
+      - name: Build APK
+        env:
+          CLANG_ASSET_DIR: ${{ github.workspace }}/build/clang-assets/clang-dist
+        run: |
+          gradle :app:assembleDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug-apk
+          path: app/build/outputs/apk/debug/*.apk

@@ -25,6 +25,12 @@ android {
         compose = true
     }
 
+    sourceSets {
+        getByName("main") {
+            assets.srcDir(layout.buildDirectory.dir("generated/clangAssets"))
+        }
+    }
+
     composeOptions {
         kotlinCompilerExtensionVersion = "1.5.14"
     }
@@ -43,6 +49,21 @@ android {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
     }
+}
+
+val clangAssetDir = providers.environmentVariable("CLANG_ASSET_DIR")
+val prepareClangAssets = tasks.register<Copy>("prepareClangAssets") {
+    val sourceDir = clangAssetDir.map { file(it) }
+    val outputDir = layout.buildDirectory.dir("generated/clangAssets/clang")
+    from(sourceDir) {
+        include("**/*")
+    }
+    into(outputDir)
+    onlyIf { sourceDir.orNull?.exists() == true }
+}
+
+tasks.named("preBuild").configure {
+    dependsOn(prepareClangAssets)
 }
 
 dependencies {
