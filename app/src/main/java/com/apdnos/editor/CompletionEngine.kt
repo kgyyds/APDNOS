@@ -13,6 +13,11 @@ data class CompletionResult(
 )
 
 object CompletionEngine {
+    private data class IndexedItem(
+        val item: CompletionItem,
+        val lowercase: String
+    )
+
     private val instructions = listOf(
         "mov",
         "ldr",
@@ -87,7 +92,7 @@ object CompletionEngine {
         snippets.forEachIndexed { index, item ->
             add(CompletionItem(item, trailingSpace = true, priority = 200 + index))
         }
-    }
+    }.map { IndexedItem(it, it.label.lowercase()) }
 
     fun compute(text: String, cursor: Int): CompletionResult? {
         if (cursor <= 0 || cursor > text.length) return null
@@ -99,15 +104,15 @@ object CompletionEngine {
         if (token.isEmpty()) return null
 
         val normalized = token.lowercase()
-        val matches = completionItems.mapNotNull { item ->
-            val label = item.label.lowercase()
+        val matches = completionItems.mapNotNull { indexed ->
+            val label = indexed.lowercase
             val score = when {
                 label.startsWith(normalized) -> 2
                 label.contains(normalized) -> 1
                 else -> 0
             }
             if (score == 0) return@mapNotNull null
-            Candidate(item, score)
+            Candidate(indexed.item, score)
         }.sortedWith(
             compareByDescending<Candidate> { it.score }
                 .thenBy { it.item.priority }
@@ -130,7 +135,7 @@ object CompletionEngine {
     }
 
     fun shouldHideOnChar(char: Char): Boolean {
-        return char == ' ' || char == '\n' || char == '\t' || char == ','
+        return char == ' ' || char == '\n' || char == '\t' || char == ',' || char == ')'
     }
 
     private fun findTokenRange(text: String, cursor: Int): IntRange? {

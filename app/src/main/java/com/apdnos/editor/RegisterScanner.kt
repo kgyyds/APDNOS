@@ -12,27 +12,28 @@ object RegisterScanner {
     )
 
     fun scan(text: String): RegisterUsage {
-        val cleaned = text.lineSequence()
-            .map { stripComment(it) }
-            .joinToString("\n")
         val xRegisters = mutableSetOf<Int>()
         val wRegisters = mutableSetOf<Int>()
         val specials = mutableSetOf<String>()
 
-        registerRegex.findAll(cleaned).forEach { match ->
-            val token = match.value.lowercase()
-            when {
-                token.startsWith("x") && token.length > 1 && token != "xzr" -> {
-                    token.drop(1).toIntOrNull()?.let { xRegisters.add(it) }
-                }
-                token.startsWith("w") && token.length > 1 && token != "wzr" -> {
-                    token.drop(1).toIntOrNull()?.let { wRegisters.add(it) }
-                }
-                token == "sp" || token == "xzr" || token == "wzr" || token == "fp" || token == "lr" -> {
-                    specials.add(token)
+        text.lineSequence()
+            .map { stripCommentsAndStrings(it) }
+            .forEach { line ->
+                registerRegex.findAll(line).forEach { match ->
+                    val token = match.value.lowercase()
+                    when {
+                        token.startsWith("x") && token.length > 1 && token != "xzr" -> {
+                            token.drop(1).toIntOrNull()?.let { xRegisters.add(it) }
+                        }
+                        token.startsWith("w") && token.length > 1 && token != "wzr" -> {
+                            token.drop(1).toIntOrNull()?.let { wRegisters.add(it) }
+                        }
+                        token == "sp" || token == "xzr" || token == "wzr" || token == "fp" || token == "lr" -> {
+                            specials.add(token)
+                        }
+                    }
                 }
             }
-        }
 
         val xSorted = xRegisters.toList().sorted().map { "x$it" }
         val wSorted = wRegisters.toList().sorted().map { "w$it" }
@@ -44,10 +45,41 @@ object RegisterScanner {
 
     fun emptyUsage(): RegisterUsage = RegisterUsage(emptyList(), emptyList(), emptyList())
 
-    private fun stripComment(line: String): String {
-        val hashIndex = line.indexOf('#').takeIf { it >= 0 } ?: Int.MAX_VALUE
-        val slashIndex = line.indexOf("//").takeIf { it >= 0 } ?: Int.MAX_VALUE
-        val cutIndex = minOf(hashIndex, slashIndex)
-        return if (cutIndex == Int.MAX_VALUE) line else line.substring(0, cutIndex)
+    private fun stripCommentsAndStrings(line: String): String {
+        val builder = StringBuilder()
+        var index = 0
+        var inQuote: Char? = null
+        while (index < line.length) {
+            val char = line[index]
+            if (inQuote != null) {
+                if (char == '\\' && index + 1 < line.length) {
+                    index += 2
+                    continue
+                }
+                if (char == inQuote) {
+                    inQuote = null
+                }
+                index += 1
+                continue
+            }
+
+            if (char == '"' || char == '\'') {
+                inQuote = char
+                index += 1
+                continue
+            }
+
+            if (char == '#') {
+                break
+            }
+
+            if (char == '/' && index + 1 < line.length && line[index + 1] == '/') {
+                break
+            }
+
+            builder.append(char)
+            index += 1
+        }
+        return builder.toString()
     }
 }

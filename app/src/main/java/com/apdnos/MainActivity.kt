@@ -51,9 +51,9 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextRange
@@ -80,20 +80,20 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.sp
+import androidx.activity.compose.BackHandler
+import androidx.compose.runtime.collectAsState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.map
 import java.io.File
 import java.util.UUID
 import com.apdnos.editor.CompletionEngine
 import com.apdnos.editor.CompletionItem
 import com.apdnos.editor.CompletionPopup
 import com.apdnos.editor.RegisterBar
-import com.apdnos.editor.RegisterScanner
+import com.apdnos.editor.EditorController
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -127,13 +127,13 @@ private fun RootLabScreen() {
     val asmDirectory = remember { File(context.filesDir, "asm") }
     val editorScrollState = rememberScrollState()
     val consoleScrollState = rememberScrollState()
-    val focusRequester = remember { FocusRequester() }
     var editorSize by remember { mutableStateOf(IntSize.Zero) }
-    var completionItems by remember { mutableStateOf<List<CompletionItem>>(emptyList()) }
-    var completionRange by remember { mutableStateOf<IntRange?>(null) }
-    var completionVisible by remember { mutableStateOf(false) }
-    var selectedCompletionIndex by remember { mutableIntStateOf(0) }
-    var registerUsage by remember { mutableStateOf(RegisterScanner.emptyUsage()) }
+    var completionOffset by remember { mutableStateOf(IntOffset.Zero) }
+    var completionMaxSize by remember { mutableStateOf(IntSize.Zero) }
+    val editorController = remember { EditorController(scope) }
+    val completionState by editorController.completionState.collectAsState()
+    val registerUsage by editorController.registerUsage.collectAsState()
+    val completionVisible = completionState.isVisible && completionState.items.isNotEmpty()
     val sidebarWidth by animateDpAsState(
         targetValue = if (isSidebarOpen) 260.dp else 0.dp,
         label = "sidebarWidth"
@@ -148,8 +148,19 @@ private fun RootLabScreen() {
             (1..lineCount).joinToString("\n") { it.toString() }
         }
     }
+    val density = LocalDensity.current
+    val fontSize = MaterialTheme.typography.bodySmall.fontSize
+    val lineHeight = MaterialTheme.typography.bodySmall.lineHeight.takeIf { it != androidx.compose.ui.unit.TextUnit.Unspecified }
+        ?: (fontSize * 1.4f)
+    val charWidthPx = with(density) { fontSize.toPx() * 0.6f }
+    val lineHeightPx = with(density) { lineHeight.toPx() }
+    val lineNumberWidthPx = with(density) { 48.dp.toPx() }
+    val lineNumberPaddingPx = with(density) { 8.dp.toPx() }
+    val editorPaddingPx = with(density) { 8.dp.toPx() }
+    val popupGapPx = with(density) { 8.dp.toPx() }
 
     LaunchedEffect(Unit) {
+        editorController.start()
         if (!asmDirectory.exists()) {
             asmDirectory.mkdirs()
         }
@@ -169,37 +180,38 @@ private fun RootLabScreen() {
             val content = existingFiles.first().readText()
             asmSource = TextFieldValue(content, selection = TextRange(content.length))
         }
+        editorController.onEditorChange(asmSource.text, asmSource.selection.start)
         rootStatus = checkRoot()
     }
 
     LaunchedEffect(Unit) {
-        snapshotFlow { asmSource }
-            .debounce(150)
-            .map { it.text to it.selection.start }
+        snapshotFlow {
+            val cursor = asmSource.selection.start.coerceIn(0, asmSource.text.length)
+            val textBeforeCursor = asmSource.text.take(cursor)
+            val lineIndex = textBeforeCursor.count { it == '\n' }
+            val columnIndex = cursor - (textBeforeCursor.lastIndexOf('\n') + 1).coerceAtLeast(0)
+            Triple(lineIndex, columnIndex, editorScrollState.value)
+        }
             .distinctUntilChanged()
-            .collect { (text, cursor) ->
-                val result = CompletionEngine.compute(text, cursor)
-                if (result == null || result.items.isEmpty()) {
-                    completionVisible = false
-                    completionItems = emptyList()
-                    completionRange = null
-                    selectedCompletionIndex = 0
+            .collect { (lineIndex, columnIndex, scrollY) ->
+                val caretX = editorPaddingPx + lineNumberWidthPx + lineNumberPaddingPx + (columnIndex * charWidthPx)
+                val caretY = editorPaddingPx + (lineIndex * lineHeightPx) - scrollY
+                val popupWidthPx = completionMaxSize.width.toFloat().coerceAtLeast(160f)
+                val popupHeightPx = completionMaxSize.height.toFloat()
+                val shouldShowAbove = caretY + lineHeightPx + popupGapPx + popupHeightPx > editorSize.height
+                val rawPopupY = if (shouldShowAbove) {
+                    caretY - popupHeightPx - popupGapPx
                 } else {
-                    completionItems = result.items
-                    completionRange = result.tokenRange
-                    completionVisible = true
-                    selectedCompletionIndex = 0
+                    caretY + lineHeightPx + popupGapPx
                 }
+                val popupX = caretX.coerceIn(0f, editorSize.width - popupWidthPx)
+                val popupY = rawPopupY.coerceIn(0f, editorSize.height - popupHeightPx)
+                completionOffset = IntOffset(popupX.toInt(), popupY.toInt())
             }
     }
 
-    LaunchedEffect(Unit) {
-        snapshotFlow { asmSource.text }
-            .debounce(180)
-            .distinctUntilChanged()
-            .collect { text ->
-                registerUsage = RegisterScanner.scan(text)
-            }
+    BackHandler(enabled = completionVisible) {
+        editorController.hideCompletion()
     }
 
     Column(
@@ -267,6 +279,7 @@ private fun RootLabScreen() {
                             asmFiles.add(newFileName)
                             activeFileName = newFileName
                             asmSource = TextFieldValue("")
+                            editorController.onEditorChange("", 0)
                         },
                         modifier = Modifier.fillMaxWidth()
                     ) {
@@ -312,6 +325,7 @@ private fun RootLabScreen() {
                                             activeFileName = fileName
                                             val content = File(asmDirectory, fileName).readText()
                                             asmSource = TextFieldValue(content, selection = TextRange(content.length))
+                                            editorController.onEditorChange(content, content.length)
                                         }
                                     ) {
                                         Text(text = if (isActive) "当前文件" else "切换到此文件")
@@ -328,22 +342,12 @@ private fun RootLabScreen() {
                     .fillMaxHeight()
                     .padding(16.dp)
             ) {
-                val density = LocalDensity.current
                 val lineNumberWidth = 48.dp
                 val lineNumberPadding = 8.dp
                 val editorPadding = 8.dp
-                val fontSize = MaterialTheme.typography.bodySmall.fontSize
-                val lineHeight = MaterialTheme.typography.bodySmall.lineHeight.takeIf { it != androidx.compose.ui.unit.TextUnit.Unspecified }
-                    ?: (fontSize * 1.4f)
-                val charWidthPx = with(density) { fontSize.toPx() * 0.6f }
-                val lineHeightPx = with(density) { lineHeight.toPx() }
-                val popupGapPx = with(density) { 8.dp.toPx() }
-                val lineNumberWidthPx = with(density) { lineNumberWidth.toPx() }
-                val lineNumberPaddingPx = with(density) { lineNumberPadding.toPx() }
-                val editorPaddingPx = with(density) { editorPadding.toPx() }
                 val maxPopupWidthPx = with(density) { 320.dp.toPx() }
                 val maxPopupHeightPx = with(density) { 240.dp.toPx() }
-                val rowHeightPx = with(density) { 32.dp.toPx() }
+                val rowHeightPx = with(density) { 40.dp.toPx() }
 
                 Box(
                     modifier = Modifier
@@ -380,14 +384,15 @@ private fun RootLabScreen() {
                                 }
                                 val insertedChar = CompletionEngine.detectInsertedChar(previousText, updated.text)
                                 if (insertedChar != null && CompletionEngine.shouldHideOnChar(insertedChar)) {
-                                    completionVisible = false
+                                    editorController.hideCompletion()
                                 }
+                                editorController.onEditorChange(updated.text, updated.selection.start)
                             },
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .focusRequester(focusRequester)
                                 .onPreviewKeyEvent { event ->
-                                    if (!completionVisible || completionItems.isEmpty()) {
+                                    val items = completionState.items
+                                    if (!completionVisible || items.isEmpty()) {
                                         return@onPreviewKeyEvent false
                                     }
                                     if (event.nativeKeyEvent.action != AndroidKeyEvent.ACTION_DOWN) {
@@ -395,29 +400,33 @@ private fun RootLabScreen() {
                                     }
                                     when (event.nativeKeyEvent.keyCode) {
                                         AndroidKeyEvent.KEYCODE_DPAD_DOWN -> {
-                                            selectedCompletionIndex = (selectedCompletionIndex + 1) % completionItems.size
+                                            editorController.setSelectedIndex(
+                                                (completionState.selectedIndex + 1) % items.size
+                                            )
                                             true
                                         }
                                         AndroidKeyEvent.KEYCODE_DPAD_UP -> {
-                                            selectedCompletionIndex =
-                                                (selectedCompletionIndex - 1 + completionItems.size) % completionItems.size
+                                            editorController.setSelectedIndex(
+                                                (completionState.selectedIndex - 1 + items.size) % items.size
+                                            )
                                             true
                                         }
                                         AndroidKeyEvent.KEYCODE_ENTER,
                                         AndroidKeyEvent.KEYCODE_TAB -> {
                                             applyCompletion(
                                                 asmSource,
-                                                completionItems[selectedCompletionIndex],
-                                                completionRange
+                                                items[completionState.selectedIndex],
+                                                completionState.tokenRange
                                             ) { newValue ->
                                                 asmSource = newValue
+                                                editorController.onEditorChange(newValue.text, newValue.selection.start)
                                             }
-                                            completionVisible = false
+                                            editorController.hideCompletion()
                                             true
                                         }
                                         AndroidKeyEvent.KEYCODE_ESCAPE,
                                         AndroidKeyEvent.KEYCODE_BACK -> {
-                                            completionVisible = false
+                                            editorController.hideCompletion()
                                             true
                                         }
                                         else -> false
@@ -432,35 +441,51 @@ private fun RootLabScreen() {
                             maxLines = Int.MAX_VALUE
                         )
                     }
-                    if (completionVisible && completionItems.isNotEmpty() && completionRange != null) {
-                        val cursor = asmSource.selection.start.coerceIn(0, asmSource.text.length)
-                        val textBeforeCursor = asmSource.text.take(cursor)
-                        val lineIndex = textBeforeCursor.count { it == '\n' }
-                        val columnIndex = cursor - (textBeforeCursor.lastIndexOf('\n') + 1).coerceAtLeast(0)
-                        val caretX = editorPaddingPx + lineNumberWidthPx + lineNumberPaddingPx + (columnIndex * charWidthPx)
-                        val caretY = editorPaddingPx + (lineIndex * lineHeightPx) - editorScrollState.value
+                    if (completionVisible) {
+                        Box(
+                            modifier = Modifier
+                                .matchParentSize()
+                                .pointerInput(completionOffset, completionMaxSize) {
+                                    awaitPointerEventScope {
+                                        while (true) {
+                                            val event = awaitPointerEvent()
+                                            if (event.type != PointerEventType.Release) continue
+                                            val tapOffset = event.changes.firstOrNull()?.position ?: continue
+                                            val withinX = tapOffset.x >= completionOffset.x &&
+                                                tapOffset.x <= (completionOffset.x + completionMaxSize.width)
+                                            val withinY = tapOffset.y >= completionOffset.y &&
+                                                tapOffset.y <= (completionOffset.y + completionMaxSize.height)
+                                            if (!withinX || !withinY) {
+                                                editorController.hideCompletion()
+                                            }
+                                        }
+                                    }
+                                }
+                        )
+                    }
+                    if (completionVisible && completionState.tokenRange != null) {
+                        val items = completionState.items
                         val popupWidthPx = minOf(editorSize.width * 0.7f, maxPopupWidthPx)
                         val estimatedPopupHeightPx =
-                            minOf(maxPopupHeightPx, rowHeightPx * completionItems.size.coerceAtMost(10))
-                        val shouldShowAbove = caretY + lineHeightPx + popupGapPx + estimatedPopupHeightPx > editorSize.height
-                        val rawPopupY = if (shouldShowAbove) {
-                            caretY - estimatedPopupHeightPx - popupGapPx
-                        } else {
-                            caretY + lineHeightPx + popupGapPx
+                            minOf(maxPopupHeightPx, rowHeightPx * items.size.coerceAtMost(10))
+                        val popupHeightDp = with(density) { estimatedPopupHeightPx.toDp() }
+                        val popupWidthDp = with(density) { popupWidthPx.toDp() }
+                        val maxSize = IntSize(popupWidthPx.toInt(), estimatedPopupHeightPx.toInt())
+                        if (completionMaxSize != maxSize) {
+                            completionMaxSize = maxSize
                         }
-                        val popupX = caretX.coerceIn(0f, editorSize.width - popupWidthPx)
-                        val popupY = rawPopupY.coerceIn(0f, editorSize.height - estimatedPopupHeightPx)
                         CompletionPopup(
-                            items = completionItems,
-                            selectedIndex = selectedCompletionIndex,
-                            maxWidth = with(density) { popupWidthPx.toDp() },
-                            maxHeight = with(density) { estimatedPopupHeightPx.toDp() },
-                            offset = IntOffset(popupX.toInt(), popupY.toInt()),
+                            items = items,
+                            selectedIndex = completionState.selectedIndex,
+                            maxWidth = popupWidthDp,
+                            maxHeight = popupHeightDp,
+                            offset = completionOffset,
                             onSelect = { item ->
-                                applyCompletion(asmSource, item, completionRange) { newValue ->
+                                applyCompletion(asmSource, item, completionState.tokenRange) { newValue ->
                                     asmSource = newValue
+                                    editorController.onEditorChange(newValue.text, newValue.selection.start)
                                 }
-                                completionVisible = false
+                                editorController.hideCompletion()
                             }
                         )
                     }
