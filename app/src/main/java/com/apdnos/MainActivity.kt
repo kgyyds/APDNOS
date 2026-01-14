@@ -54,6 +54,7 @@ import java.io.File
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        AdosLogger.i("MainActivity onCreate")
         setContent {
             AppTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
@@ -301,6 +302,7 @@ private fun HackerTopBar(title: String) {
 }
 
 private suspend fun checkRoot(): String = withContext(Dispatchers.IO) {
+    AdosLogger.d("Running root check")
     val result = runCommand(listOf("su", "-c", "id"))
     if (result.exitCode == 0 && result.stdout.contains("uid=0")) {
         "已获取 root 权限"
@@ -311,6 +313,44 @@ private suspend fun checkRoot(): String = withContext(Dispatchers.IO) {
 
 private suspend fun compileAndRun(clangPath: String, asmSource: String): String =
     withContext(Dispatchers.IO) {
+        AdosLogger.d("Starting compileAndRun")
+        val workDir = File("/data/local/tmp/APDNOS")
+        try {
+            if (!workDir.exists()) {
+                workDir.mkdirs()
+            }
+            val sourceFile = File(workDir, "main.S")
+            val outputFile = File(workDir, "main.out")
+            sourceFile.writeText(asmSource)
+
+            val compileCommand = buildString {
+                append(clangPath)
+                append(" -fPIE -pie -nostdlib -Wl,-e,_start ")
+                append("-Wl,--dynamic-linker=/system/bin/linker64 ")
+                append(sourceFile.absolutePath)
+                append(" -o ")
+                append(outputFile.absolutePath)
+            }
+            AdosLogger.d("Compile command: $compileCommand")
+            val compileResult = runCommand(listOf("su", "-c", compileCommand))
+            if (compileResult.exitCode != 0) {
+                return@withContext if (isRootDenied(compileResult)) {
+                    "需要 root 权限"
+                } else {
+                    formatResult("编译失败", compileResult)
+                }
+            }
+
+            runCommand(listOf("su", "-c", "chmod 755 ${outputFile.absolutePath}"))
+            val execResult = runCommand(listOf("su", "-c", outputFile.absolutePath))
+            if (execResult.exitCode != 0 && isRootDenied(execResult)) {
+                "需要 root 权限"
+            } else {
+                formatResult("执行完成", execResult)
+            }
+        } catch (ex: Exception) {
+            AdosLogger.e("compileAndRun failed", ex)
+            "执行失败: ${ex.message}"
         val workDir = File("/data/local/tmp/APDNOS")
         if (!workDir.exists()) {
             workDir.mkdirs()
@@ -349,6 +389,7 @@ private fun readAssetText(context: android.content.Context, name: String): Strin
     return try {
         context.assets.open(name).bufferedReader().use { it.readText() }
     } catch (ex: Exception) {
+        AdosLogger.w("Failed to read asset $name", ex)
         ""
     }
 }
@@ -369,6 +410,20 @@ private fun formatResult(prefix: String, result: CommandResult): String {
 }
 
 private fun runCommand(command: List<String>): CommandResult {
+    return try {
+        AdosLogger.d("Run command: ${command.joinToString(" ")}")
+        val process = ProcessBuilder(command)
+            .redirectErrorStream(false)
+            .start()
+
+        val stdout = process.inputStream.bufferedReader().use { it.readText() }
+        val stderr = process.errorStream.bufferedReader().use { it.readText() }
+        val exitCode = process.waitFor()
+        CommandResult(stdout, stderr, exitCode)
+    } catch (ex: Exception) {
+        AdosLogger.e("Command failed", ex)
+        CommandResult("", ex.message ?: "command failed", -1)
+    }
     val process = ProcessBuilder(command)
         .redirectErrorStream(false)
         .start()
@@ -385,4 +440,35 @@ private fun isRootDenied(result: CommandResult): Boolean {
         combined.contains("permission denied", ignoreCase = true) ||
         combined.contains("su: not found", ignoreCase = true) ||
         combined.contains("not permitted", ignoreCase = true)
+}
+
+private object AdosLogger {
+    private const val TAG = "ADOS"
+
+    fun d(message: String) = log("d", message, null)
+
+    fun i(message: String) = log("i", message, null)
+
+    fun w(message: String, throwable: Throwable? = null) = log("w", message, throwable)
+
+    fun e(message: String, throwable: Throwable? = null) = log("e", message, throwable)
+
+    private fun log(level: String, message: String, throwable: Throwable?) {
+        try {
+            val logClass = Class.forName("android.util.Log")
+            val method = if (throwable == null) {
+                logClass.getMethod(level, String::class.java, String::class.java)
+            } else {
+                logClass.getMethod(level, String::class.java, String::class.java, Throwable::class.java)
+            }
+            if (throwable == null) {
+                method.invoke(null, TAG, message)
+            } else {
+                method.invoke(null, TAG, message, throwable)
+            }
+        } catch (_: Exception) {
+            val suffix = if (throwable == null) "" else " - ${throwable.message}"
+            println("$TAG [$level] $message$suffix")
+        }
+    }
 }
